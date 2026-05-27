@@ -1,0 +1,59 @@
+[general]
+name=RORB catg/stm Editor
+qgisMinimumVersion=3.40
+qgisMaximumVersion=4.99
+supportsQt6=True
+description=Table-format viewer and editor for RORB .catg and .stm files — fully edit catchment node/reach data and create or edit storm files interactively.
+about=RORB catg/stm Editor displays RORB text files in interactive, colour-coded tables instead of raw text, so you can work with them without risking the underlying file structure.
+    <br><br>
+    <b>CATG Editor</b> — Open a .catg file and view nodes, reaches, storages, and inflow/outflow sections in a structured table. Every node and reach column is editable (coordinates, area, dci/ici, reach length/slope, names, print flags, etc.) with type validation and revert-on-invalid input. Batch-edit print flags for many rows at once (nodes: 0 / 70 / 71 / 72; reaches: 0 / 1). Filter and search by node name or index. The writer preserves RORB's fixed-column format exactly — original decimal counts and column widths are kept, with right-aligned numeric fields and left-aligned name fields handled separately so the saved file remains byte-compatible with RORB's parser.
+    <br><br>
+    <b>STM Editor</b> — Open an existing .stm file or create a new non-uniform storm file from scratch. The New STM wizard scaffolds a complete file (event header, storm parameters, burst time ranges, pluviograph data, sub-area rainfalls, pluviograph references, and hydrograph stations). Every section is shown as an editable table where you can add or delete bursts, pluviographs, and hydrograph stations — storm parameter counts sync automatically. Delimiter format (tab or comma) and -99 terminators are managed by the editor.
+
+version=1.0.4
+author=Irene Jaya
+email=irenejaya1@gmail.com
+tracker=https://github.com/irenejaya/RORB-catg-stm-editor/issues
+repository=https://github.com/irenejaya/RORB-catg-stm-editor
+homepage=https://github.com/irenejaya/RORB-catg-stm-editor
+
+category=Analysis
+tags=python,RORB,hydrology,catchment,storm,editor,table,rainfall-runoff,flood,non-uniform,stm,catg
+
+icon=icon.svg
+
+experimental=False
+deprecated=False
+hasProcessingProvider=no
+server=False
+
+changelog=
+    1.0.4 - Full Editability & Negative-Value Parser Fix
+        * CATG Editor: every node and reach column is now editable (coordinates, scale, area, dci, ici, name, reach length/slope, n_coords, flags) — not just print flags
+        * CATG Editor: fixed parser bug where reaches with negative slopes (or other negative numeric fields) were silently dropped. Numeric regex groups now accept negative values, and the parser advances a fixed 3 lines per reach so coord lines are preserved even on unparseable headers
+        * CATG Editor: writer now uses a generic field-splicer that preserves RORB's fixed-column format on save — original decimal counts are mirrored (e.g. user-entered 1.9 is written as 1.900 when the original had 3 decimals), and column widths are anchored. Numeric fields are right-aligned (eats leading whitespace on growth); name fields are left-aligned (eats trailing whitespace on growth)
+        * CATG Editor: per-field change tracking via _original_* snapshots; unsaved-changes detection covers every editable attribute
+        * CATG Editor: invalid cell input (wrong type, out-of-range flags) reverts to the previous value
+
+    1.0.3 - Compatibility & Sync
+        * QGIS 4.0 / Qt6 compatibility: migrated remaining short-form Qt enums (Qt.RichText, Qt.UserRole) to fully-qualified names (Qt.TextFormat.RichText, Qt.ItemDataRole.UserRole)
+        * Declared supportsQt6=True and qgisMaximumVersion=4.99
+        * CATG Editor: synced fully with the standalone script (parser, writer, batch print-flag operations, filter bar, unsaved-changes tracking, file summary)
+
+    1.0.2 - Improvement
+        * CATG Editor: Extract full table of the catg text file in a table format
+
+    1.0.1 - Bug Fix
+        * CATG Editor: Fixed critical PrintFlag parsing bug in REACHES and NODES section and added proper column ordering matching RORB file format.
+    
+    1.0.0 - Initial release
+        * CATG Editor: interactive table view of RORB catchment files
+        * CATG Editor: editable print flags for nodes and reaches
+        * CATG Editor: batch operations, filter, clipboard support
+        * STM Editor: open existing or create new non-uniform STM files
+        * STM Editor: guided New STM wizard with full section scaffolding
+        * STM Editor: add/delete bursts, pluviographs, hydrograph stations
+        * STM Editor: delimiter-preserving (tab/comma) round-trip editing
+        * Both: structured table editing — no manual text-file formatting
+        * Both: tree navigation, colour-coded sections, help panel
+        * Both: lossless file reconstruction on save
