@@ -1258,6 +1258,9 @@ class STMEditorDialog(QDialog):
                 return
 
         path = self.filepath
+        # Remember the active section index before tree.clear() destroys items.
+        active_idx = self._current_idx
+
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(10)
         QApplication.processEvents()
@@ -1270,9 +1273,36 @@ class STMEditorDialog(QDialog):
             self.progress_bar.setValue(60)
             QApplication.processEvents()
             self._populate_tree()
-            current = self.tree.currentItem()
-            if current is not None:
-                self._on_tree_changed(current, None)
+            # Re-select the previously active section. The STM tree has nested
+            # items (group parents + children), so we must search recursively.
+            restored = False
+            if active_idx >= 0:
+                def _find_item(parent, target_idx):
+                    for i in range(parent.childCount()):
+                        child = parent.child(i)
+                        if child.data(0, Qt.ItemDataRole.UserRole) == target_idx:
+                            return child
+                        found = _find_item(child, target_idx)
+                        if found:
+                            return found
+                    return None
+
+                root = self.tree.invisibleRootItem()
+                match = _find_item(root, active_idx)
+                if match is not None:
+                    self.tree.setCurrentItem(match)
+                    # setCurrentItem fires currentItemChanged -> _on_tree_changed
+                    # -> _show_editor automatically.
+                    restored = True
+            if not restored:
+                # Fall back: select the first leaf item (skip group parents).
+                root = self.tree.invisibleRootItem()
+                for i in range(root.childCount()):
+                    item = root.child(i)
+                    if item.data(0, Qt.ItemDataRole.UserRole) is not None and \
+                            item.data(0, Qt.ItemDataRole.UserRole) >= 0:
+                        self.tree.setCurrentItem(item)
+                        break
             self.progress_bar.setValue(100)
             QApplication.processEvents()
             QTimer.singleShot(1200, lambda: self.progress_bar.setVisible(False))
