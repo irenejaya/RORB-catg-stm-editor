@@ -673,9 +673,17 @@ class CATGWriter:
             # Decide line2: changed if print_flag changed or location changed
             if (node.print_flag != node._original_print_flag or
                     node.print_location != node._original_location):
-                out.append(self._reconstruct_line2(node))
+                new_line2 = self._reconstruct_line2(node)
             else:
-                out.append(node.raw_line2)
+                new_line2 = node.raw_line2
+            out.append(new_line2)
+            # Update raw_line/raw_line2 to the just-written content so that
+            # subsequent saves always patch from the last-saved state, not from
+            # the original file content.  Without this, a second save after the
+            # first would compare current values against the updated snapshot
+            # (equal → skip), then emit the stale raw_line, losing all edits.
+            node.raw_line = new_line
+            node.raw_line2 = new_line2
             self._snapshot_node(node)
 
         out.extend(catg.node_gap)
@@ -687,6 +695,8 @@ class CATGWriter:
                 out.append(new_header)
                 # Coord lines: always preserved verbatim (never edited via UI)
                 out.extend(reach.raw_lines[1:])
+                # Same fix: keep raw_lines[0] in sync with what was written.
+                reach.raw_lines[0] = new_header
             self._snapshot_reach(reach)
 
         out.extend(catg.reach_gap)
@@ -1362,6 +1372,12 @@ class CATGEditorDialog(QDialog):
                 return
 
         path = self.filepath
+        # Remember which section was active before we clear the tree.
+        active_key = None
+        current_item = self.tree.currentItem()
+        if current_item is not None:
+            active_key = current_item.data(0, Qt.ItemDataRole.UserRole)
+
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(10)
         QApplication.processEvents()
@@ -1374,10 +1390,23 @@ class CATGEditorDialog(QDialog):
             self.progress_bar.setValue(60)
             QApplication.processEvents()
             self._populate_tree()
-            # Re-show whichever editor was active
-            current = self.tree.currentItem()
-            if current is not None:
-                self._on_tree_changed(current, None)
+            # Re-select the previously active section (tree.clear() destroyed
+            # the old item reference so currentItem() is now None).
+            restored = False
+            if active_key is not None:
+                for i in range(self.tree.topLevelItemCount()):
+                    item = self.tree.topLevelItem(i)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == active_key:
+                        self.tree.setCurrentItem(item)
+                        # setCurrentItem fires currentItemChanged → _on_tree_changed
+                        # → _show_editor, so the panel updates automatically.
+                        restored = True
+                        break
+            if not restored:
+                # Fall back: select the first item (nodes)
+                first = self.tree.topLevelItem(0)
+                if first is not None:
+                    self.tree.setCurrentItem(first)
             self.progress_bar.setValue(100)
             QApplication.processEvents()
             QTimer.singleShot(1200, lambda: self.progress_bar.setVisible(False))
