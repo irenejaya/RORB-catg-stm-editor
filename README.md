@@ -12,9 +12,12 @@ A QGIS plugin for viewing and editing RORB catchment (`.catg`) and storm
 
 ## Installation
 
-Requires QGIS 3.40 or later. Copy this plugin folder into the `python/plugins`
-folder of your active QGIS profile, restart QGIS, then enable **RORB catg/stm
-Editor** in **Plugins → Manage and Install Plugins → Installed**.
+Requires QGIS 3.40 or later. Install the plugin ZIP through
+**Plugins → Manage and Install Plugins → Install from ZIP**.
+
+For manual installation, copy that folder into `python/plugins` in your active
+QGIS profile, restart QGIS, then enable **RORB catg/stm Editor** under
+**Plugins → Manage and Install Plugins → Installed**.
 
 ## Use
 
