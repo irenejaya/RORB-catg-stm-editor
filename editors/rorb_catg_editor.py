@@ -2479,7 +2479,9 @@ class CATGEditorDialog(QDialog):
 
         # Analyse data block
         total_lines = len(catg.end_lines)
-        comment_lines = sum(1 for l in catg.end_lines if l.strip().startswith('C'))
+        comment_lines = sum(
+            1 for line in catg.end_lines if line.strip().startswith('C')
+        )
         instruction_lines = total_lines - comment_lines
 
         # Count code 7 (PRINT) instructions
@@ -2550,12 +2552,18 @@ class CATGEditorDialog(QDialog):
             )
             layer_name = os.path.splitext(os.path.basename(path))[0]
             layer = QgsVectorLayer(uri, layer_name, "delimitedtext")
-            if layer.isValid():
-                QgsProject.instance().addMapLayer(layer)
-                return True
-        except Exception:
-            pass
-        return False
+            if not layer.isValid():
+                raise RuntimeError("QGIS could not create a valid CSV table layer.")
+            if QgsProject.instance().addMapLayer(layer) is None:
+                raise RuntimeError("QGIS could not add the CSV table to the project.")
+            return True
+        except (ImportError, RuntimeError) as exc:
+            QMessageBox.warning(
+                self, "CSV Layer Import Error",
+                f"The CSV was exported to:\n{path}\n\n"
+                f"It could not be added to the QGIS project:\n{exc}"
+            )
+            return False
 
     # ====================================================================
     # EXPORT: Nodes → CSV
@@ -2606,7 +2614,9 @@ class CATGEditorDialog(QDialog):
                         int(node.print_flag),
                         node.print_location,
                     ])
-            self._load_csv_in_qgis(path)
+            if not self._load_csv_in_qgis(path):
+                self._status(f"Nodes CSV exported, but not added to QGIS → {path}")
+                return
             self._status(f"Nodes CSV exported successfully → {path}")
         except OSError as exc:
             QMessageBox.critical(
@@ -2661,7 +2671,9 @@ class CATGEditorDialog(QDialog):
                         int(reach.n_coords),
                         int(reach.unknown2),
                     ])
-            self._load_csv_in_qgis(path)
+            if not self._load_csv_in_qgis(path):
+                self._status(f"Reaches CSV exported, but not added to QGIS → {path}")
+                return
             self._status(f"Reaches CSV exported successfully → {path}")
         except OSError as exc:
             QMessageBox.critical(

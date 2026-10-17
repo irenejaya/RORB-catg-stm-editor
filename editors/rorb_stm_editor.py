@@ -1782,7 +1782,8 @@ class STMEditorDialog(QDialog):
         default_name = f"Pluvio_{count + 1}"
 
         text, ok = QInputDialog.getText(
-            self, "New Pluviograph", "Station ID:", QLineEdit.Normal, default_name
+            self, "New Pluviograph", "Station ID:",
+            QLineEdit.EchoMode.Normal, default_name
         )
         if not ok or not text.strip():
             return
@@ -1873,7 +1874,7 @@ class STMEditorDialog(QDialog):
 
         text, ok = QInputDialog.getText(
             self, "New Hydrograph Station", "Station Name / ID:",
-            QLineEdit.Normal, default_name,
+            QLineEdit.EchoMode.Normal, default_name,
         )
         if not ok or not text.strip():
             return

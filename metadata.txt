@@ -29,6 +29,8 @@ server=False
 
 changelog=
     1.0.8
+        * STM Editor: use scoped QLineEdit echo-mode enums for Qt6 compatibility
+        * CATG Editor: report CSV layer-loading failures instead of silently ignoring them; fix ambiguous variable name
         * CATG and STM Editors: dark-mode friendly dialogs — colours adapt automatically when QGIS uses a dark theme
         * STM Editor: added UTF-8 and Windows-1252/ANSI encoding detection and encoding-preserving saves 
         * CATG Editor: tolerate duplicated RORB print-location lines without shifting or losing subsequent node rows
