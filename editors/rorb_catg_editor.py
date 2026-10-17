@@ -32,6 +32,7 @@ Usage:
         exec(open(r'path/to/RORB_catg_editor.py').read())
 """
 
+import csv
 import os
 import re
 from dataclasses import dataclass, field
@@ -50,6 +51,10 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QFont, QColor, QKeySequence
 
+try:
+    from . import dark_theme
+except ImportError:  # run standalone via exec() from the QGIS console
+    import dark_theme
 
 # ============================================================================
 #  Constants
@@ -76,10 +81,14 @@ REACH_PRINT_FLAGS = {
 class NodeData:
     """Parsed node from C #NODES section.
 
-    Each node occupies 2 lines in the comment block:
+    Each node normally occupies 2 lines in the comment block:
       Line 1: C  <idx> <x> <y> <scale> <subarea_flag> <unk> <downstream> <name>
               <area> <dci> <ici> <print_flag> <flag2> <flag3>
       Line 2: C <print_location or blank>
+
+    Some RORB-generated files repeat the print-location line. In that case
+    ``raw_line2`` contains the repeated physical lines joined by ``\n`` so an
+    unchanged file can still be written back losslessly.
     """
     index: int = 0
     x: float = 0.0
@@ -96,7 +105,7 @@ class NodeData:
     flag2: int = 0
     flag3: int = 0
     raw_line: str = ""              # original first C line (preserved)
-    raw_line2: str = ""             # original second C line (preserved)
+    raw_line2: str = ""             # original location line(s), preserved
     print_location: str = ""        # extracted location name
     _original_index: int = 0
     _original_x: float = 0.0
@@ -206,10 +215,11 @@ class CATGParser:
     """
 
     # Float fields use (-?[\d.]+) to allow negative slope/coords/etc.
+    # ICI (group 11) is optional — 13-field files (no impervious split) omit it.
     NODE_RE = re.compile(
         r'^C\s+(\d+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+'
         r'(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+'
-        r'(-?[\d.]+)\s+(-?[\d.]+)\s+(-?[\d.]+)\s+'
+        r'(-?[\d.]+)\s+(-?[\d.]+)\s+(?:(-?[\d.]+)\s+)?'
         r'(\d+)\s+(\d+)\s+(\d+)\s*$'
     )
 
@@ -278,15 +288,38 @@ class CATGParser:
             if idx + 1 >= len(lines):
                 break
             raw_line = lines[idx]
-            raw_line2 = lines[idx + 1]
+            location_lines = [lines[idx + 1]]
             idx += 2
 
             m = self.NODE_RE.match(raw_line)
             if m:
                 pf = int(m.group(12))
+
+                # RORB can occasionally emit the same non-blank print-location
+                # line more than once. Consuming only one line shifts the
+                # fixed two-line node pairing and makes every later row fail.
+                # Consume only exact duplicates, leaving any other unexpected
+                # line for the normal fallback parser on the next iteration.
+                first_location = location_lines[0].strip()
+                while (
+                    pf in (70, 71, 72)
+                    and first_location not in ("", "C")
+                    and idx < reaches_idx
+                    and not self.NODE_RE.match(lines[idx])
+                    and lines[idx].strip() == first_location
+                ):
+                    location_lines.append(lines[idx])
+                    idx += 1
+
+                raw_line2 = "\n".join(location_lines)
                 location = ""
-                if pf in (70, 71, 72) and len(raw_line2) > 2:
-                    location = raw_line2[2:].strip()
+                if pf in (70, 71, 72):
+                    location_parts = [
+                        line[2:].strip()
+                        for line in location_lines
+                        if len(line) > 2 and line[2:].strip()
+                    ]
+                    location = " ".join(location_parts)
 
                 node = NodeData(
                     index=int(m.group(1)),
@@ -299,7 +332,7 @@ class CATGParser:
                     name=m.group(8),
                     area=float(m.group(9)),
                     dci=float(m.group(10)),
-                    ici=float(m.group(11)),
+                    ici=float(m.group(11)) if m.group(11) is not None else 0.0,
                     print_flag=pf,
                     flag2=int(m.group(13)),
                     flag3=int(m.group(14)),
@@ -327,7 +360,7 @@ class CATGParser:
             else:
                 # Fallback: unparseable node — store raw lines
                 catg.nodes.append(NodeData(
-                    raw_line=raw_line, raw_line2=raw_line2,
+                    raw_line=raw_line, raw_line2=location_lines[0],
                     name="?PARSE_ERR",
                 ))
 
@@ -585,6 +618,10 @@ class CATGWriter:
             orig = getattr(obj, orig_attr)
             if cur == orig:
                 continue
+            span = m.span(grp)
+            if span[0] == -1:
+                # Optional group absent in original line — cannot splice
+                continue
             orig_text = m.group(grp)
             if is_float is None:  # string field (name) — left-aligned
                 new_text = str(cur)
@@ -595,7 +632,7 @@ class CATGWriter:
             else:
                 new_text = self._fmt_int(cur)
                 align = 'right'
-            line = self._splice(line, m.span(grp), new_text, align=align)
+            line = self._splice(line, span, new_text, align=align)
         return line
 
     def _patch_node(self, node) -> str:
@@ -614,7 +651,10 @@ class CATGWriter:
 
         Preserves original line width by padding/trimming as needed.
         """
-        original_width = len(node.raw_line2) if node.raw_line2 else 52
+        original_width = max(
+            (len(line) for line in node.raw_line2.splitlines()),
+            default=52,
+        )
 
         if node.print_flag in (70, 71, 72):
             if node.print_location and node.print_location.strip():
@@ -794,6 +834,13 @@ class CATGEditorDialog(QDialog):
     COLOR_PRINT   = QColor(255, 243, 224)    # Orange tint — print-enabled rows
     COLOR_READONLY = QColor(240, 240, 240)   # Gray — read-only cells
     COLOR_EDITABLE = QColor(255, 255, 255)   # White — editable cells
+    COLOR_PRINT_ROW = QColor(255, 224, 178)  # Orange — print flag cells
+
+    _COLOR_NAMES = (
+        "COLOR_INTRO", "COLOR_NODE", "COLOR_REACH", "COLOR_STORAGE", "COLOR_IO",
+        "COLOR_DATA", "COLOR_PRINT", "COLOR_READONLY", "COLOR_EDITABLE",
+        "COLOR_PRINT_ROW",
+    )
 
     MONO = QFont("Consolas", 10)
 
@@ -804,12 +851,19 @@ class CATGEditorDialog(QDialog):
         self._updating = False    # guard for cellChanged feedback loops
         self._has_unsaved_changes = False  # track unsaved changes
 
+        # Dark QGIS theme: swap the pastel colours for dark equivalents
+        self._dark = dark_theme.is_dark(self)
+        if self._dark:
+            for name in self._COLOR_NAMES:
+                setattr(self, name, dark_theme.adapt_color(getattr(type(self), name), True))
+
         self.setWindowTitle("RORB CATG Editor")
         self.setMinimumSize(1100, 650)
         self.resize(1400, 800)
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
 
         self._build_ui()
+        dark_theme.retheme(self, self._dark)
         self._wire_signals()
 
     # ====================================================================
@@ -938,6 +992,45 @@ class CATGEditorDialog(QDialog):
             QPushButton:disabled { background-color: #BDBDBD; color: #888; }
         """)
 
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.VLine)
+        sep.setFrameShadow(QFrame.Shadow.Sunken)
+        sep.setStyleSheet("color: #ccc; margin: 4px 4px;")
+
+        self.btn_export_nodes = QPushButton("  Export Nodes CSV")
+        self.btn_export_nodes.setEnabled(False)
+        self.btn_export_nodes.setToolTip(
+            "Export the Nodes table to a CSV file\n"
+            "Use in QGIS to join attributes to a spatial nodes layer"
+        )
+        self.btn_export_nodes.setStyleSheet("""
+            QPushButton {
+                background-color: #00897B; color: white; border: none;
+                padding: 7px 14px; border-radius: 4px; font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover { background-color: #00695C; }
+            QPushButton:pressed { background-color: #004D40; }
+            QPushButton:disabled { background-color: #BDBDBD; color: #888; }
+        """)
+
+        self.btn_export_reaches = QPushButton("  Export Reaches CSV")
+        self.btn_export_reaches.setEnabled(False)
+        self.btn_export_reaches.setToolTip(
+            "Export the Reaches table to a CSV file\n"
+            "Use in QGIS to join attributes to a spatial reaches layer"
+        )
+        self.btn_export_reaches.setStyleSheet("""
+            QPushButton {
+                background-color: #1565C0; color: white; border: none;
+                padding: 7px 14px; border-radius: 4px; font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton:hover { background-color: #0D47A1; }
+            QPushButton:pressed { background-color: #01295C; }
+            QPushButton:disabled { background-color: #BDBDBD; color: #888; }
+        """)
+
         self.lbl_file = QLabel("No file loaded")
         self.lbl_file.setStyleSheet(
             "color: #666; font-style: italic; font-size: 10pt; padding-left: 12px;"
@@ -947,6 +1040,9 @@ class CATGEditorDialog(QDialog):
         layout.addWidget(self.btn_save)
         layout.addWidget(self.btn_save_as)
         layout.addWidget(self.btn_refresh)
+        layout.addWidget(sep)
+        layout.addWidget(self.btn_export_nodes)
+        layout.addWidget(self.btn_export_reaches)
         layout.addStretch()
         layout.addWidget(self.lbl_file)
         return group
@@ -979,7 +1075,7 @@ class CATGEditorDialog(QDialog):
         layout.addWidget(title)
 
         # Help text
-        help_text = QLabel(
+        help_text = QLabel(dark_theme.adapt_stylesheet(
             "<b>How to use:</b><br>"
             "1. Click <b style='color:#1565C0;'>Open CATG</b> to load a file<br>"
             "2. Navigate sections in the <b>tree</b> on the left<br>"
@@ -1004,8 +1100,9 @@ class CATGEditorDialog(QDialog):
             "(routing instructions) is preserved verbatim<br><br>"
             "<b>Note:</b> After changing fields, you may need to "
             "regenerate the instruction data in RORB GE for the changes "
-            "to take effect in simulations."
-        )
+            "to take effect in simulations.",
+            self._dark,
+        ))
         help_text.setWordWrap(True)
         help_text.setTextFormat(Qt.TextFormat.RichText)
         help_text.setStyleSheet("font-size: 9pt;")
@@ -1117,6 +1214,8 @@ class CATGEditorDialog(QDialog):
         self.btn_save.clicked.connect(self._on_save)
         self.btn_save_as.clicked.connect(self._on_save_as)
         self.btn_refresh.clicked.connect(self._on_refresh)
+        self.btn_export_nodes.clicked.connect(self._on_export_nodes_csv)
+        self.btn_export_reaches.clicked.connect(self._on_export_reaches_csv)
         self.tree.currentItemChanged.connect(self._on_tree_changed)
 
     # ====================================================================
@@ -1175,6 +1274,10 @@ class CATGEditorDialog(QDialog):
         )
         self.btn_save.setEnabled(False)
         self.btn_save_as.setEnabled(False)
+        self.btn_export_nodes.setEnabled(False)
+        self.btn_export_reaches.setEnabled(False)
+        dark_theme.retheme(self.editor_box, self._dark)
+        dark_theme.retheme(self.lbl_file, self._dark)
         
         # Reset window title
         self.setWindowTitle("RORB CATG Editor")
@@ -1277,9 +1380,12 @@ class CATGEditorDialog(QDialog):
             self.lbl_file.setStyleSheet(
                 "color: #333; font-weight: bold; font-size: 10pt; padding-left: 12px;"
             )
+            dark_theme.retheme(self.lbl_file, self._dark)
             self.btn_save.setEnabled(True)
             self.btn_save_as.setEnabled(True)
             self.btn_refresh.setEnabled(True)
+            self.btn_export_nodes.setEnabled(True)
+            self.btn_export_reaches.setEnabled(True)
             self._clear_unsaved_changes()
 
             self.progress_bar.setValue(60)
@@ -1559,6 +1665,7 @@ class CATGEditorDialog(QDialog):
         fn = dispatchers.get(key)
         if fn:
             fn()
+        dark_theme.retheme(self.editor_box, self._dark)
 
     # ====================================================================
     # EDITOR: Intro / Header
@@ -1720,7 +1827,7 @@ class CATGEditorDialog(QDialog):
             if node.print_flag in (70, 71, 72):
                 it = tbl.item(row, PRINT_COL)
                 if it:
-                    it.setBackground(QColor(255, 224, 178))
+                    it.setBackground(self.COLOR_PRINT_ROW)
         self._updating = False
 
         # --- Helper: colour a single row ---
@@ -1733,7 +1840,7 @@ class CATGEditorDialog(QDialog):
                     continue
                 if col == PRINT_COL:
                     it.setBackground(
-                        QColor(255, 224, 178) if is_print else self.COLOR_EDITABLE
+                        self.COLOR_PRINT_ROW if is_print else self.COLOR_EDITABLE
                     )
                 elif col == LOC_COL:
                     if is_print:
@@ -2041,7 +2148,7 @@ class CATGEditorDialog(QDialog):
             if reach.print_flag != 0:
                 it = tbl.item(row, PRINT_COL)
                 if it:
-                    it.setBackground(QColor(255, 224, 178))
+                    it.setBackground(self.COLOR_PRINT_ROW)
         self._updating = False
 
         # --- Helper: colour a single row ---
@@ -2054,7 +2161,7 @@ class CATGEditorDialog(QDialog):
                     continue
                 if col == PRINT_COL:
                     it.setBackground(
-                        QColor(255, 224, 178) if is_print else self.COLOR_EDITABLE
+                        self.COLOR_PRINT_ROW if is_print else self.COLOR_EDITABLE
                     )
                 else:
                     it.setBackground(self.COLOR_EDITABLE)
@@ -2423,3 +2530,141 @@ class CATGEditorDialog(QDialog):
             f"<b>PRINT points:</b> {print_count}<br>"
             f"<b>Status:</b> Read-only (preserved verbatim)"
         )
+
+    # ====================================================================
+    # EXPORT: helpers
+    # ====================================================================
+
+    def _load_csv_in_qgis(self, path: str) -> bool:
+        """Add the exported CSV to the current QGIS project as a table layer.
+
+        Returns True if the layer was added successfully.
+        """
+        try:
+            from qgis.core import QgsVectorLayer, QgsProject
+            uri = (
+                "file:///"
+                + path.replace("\\", "/")
+                + "?type=csv&delimiter=,&useHeader=yes&noGeometry=yes"
+                "&detectTypes=no&encoding=UTF-8"
+            )
+            layer_name = os.path.splitext(os.path.basename(path))[0]
+            layer = QgsVectorLayer(uri, layer_name, "delimitedtext")
+            if layer.isValid():
+                QgsProject.instance().addMapLayer(layer)
+                return True
+        except Exception:
+            pass
+        return False
+
+    # ====================================================================
+    # EXPORT: Nodes → CSV
+    # ====================================================================
+
+    def _on_export_nodes_csv(self):
+        """Export the Nodes table to a CSV file for QGIS table joins."""
+        if not self.catg or not self.catg.nodes:
+            QMessageBox.warning(self, "No Data", "No nodes data to export.")
+            return
+
+        # Suggest a default filename alongside the open catg file
+        default_path = ""
+        if self.filepath:
+            base = os.path.splitext(self.filepath)[0]
+            default_path = base + "_nodes.csv"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Nodes to CSV", default_path,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        headers = [
+            "Index", "X", "Y", "NodeSize", "SubArea", "OutletFlag",
+            "Downstream", "Name", "Area", "DCI", "ICI",
+            "PrintFlag", "PrintLocation",
+        ]
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for node in self.catg.nodes:
+                    writer.writerow([
+                        int(node.index),
+                        f"{node.x:.3f}",
+                        f"{node.y:.3f}",
+                        f"{node.scale:.3f}",
+                        int(node.subarea_flag),
+                        int(node.unknown_flag),
+                        int(node.downstream),
+                        node.name,
+                        f"{node.area:.6f}",
+                        f"{node.dci:.6f}",
+                        f"{node.ici:.6f}",
+                        int(node.print_flag),
+                        node.print_location,
+                    ])
+            self._load_csv_in_qgis(path)
+            self._status(f"Nodes CSV exported successfully → {path}")
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Export Error",
+                f"Failed to write CSV:\n\n{exc}"
+            )
+
+    # ====================================================================
+    # EXPORT: Reaches → CSV
+    # ====================================================================
+
+    def _on_export_reaches_csv(self):
+        """Export the Reaches table to a CSV file for QGIS table joins."""
+        if not self.catg or not self.catg.reaches:
+            QMessageBox.warning(self, "No Data", "No reaches data to export.")
+            return
+
+        # Suggest a default filename alongside the open catg file
+        default_path = ""
+        if self.filepath:
+            base = os.path.splitext(self.filepath)[0]
+            default_path = base + "_reaches.csv"
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Reaches to CSV", default_path,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not path:
+            return
+
+        headers = [
+            "Index", "Name", "FromNode", "ToNode",
+            "TransFlag", "Type", "PrintFlag", "Length", "Slope", "Ncoords",
+            "Unknown2",
+        ]
+
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow(headers)
+                for reach in self.catg.reaches:
+                    writer.writerow([
+                        int(reach.index),
+                        reach.name,
+                        int(reach.from_node),
+                        int(reach.to_node),
+                        int(reach.unknown1),
+                        int(reach.reach_type),
+                        int(reach.print_flag),
+                        f"{reach.length:.3f}",
+                        f"{reach.slope:.3f}",
+                        int(reach.n_coords),
+                        int(reach.unknown2),
+                    ])
+            self._load_csv_in_qgis(path)
+            self._status(f"Reaches CSV exported successfully → {path}")
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Export Error",
+                f"Failed to write CSV:\n\n{exc}"
+            )

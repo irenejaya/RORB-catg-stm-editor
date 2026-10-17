@@ -41,6 +41,10 @@ from qgis.PyQt.QtWidgets import (
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QFont, QColor, QKeySequence
 
+try:
+    from . import dark_theme
+except ImportError:  # run standalone via exec() from the QGIS console
+    import dark_theme
 
 # ============================================================================
 #  Data Model
@@ -92,14 +96,32 @@ class STMParser:
         self.pluvio_count: int = 0
         self.duration: int = 0
         self.time_inc: int = 0
+        self.source_encoding: str = "utf-8"
 
     # -- helpers --------------------------------------------------------------
 
-    @staticmethod
-    def _clean_lines(filepath: str) -> List[str]:
-        """Read file and strip trailing whitespace (spreadsheet tab artefacts)."""
-        with open(filepath, "r", encoding="utf-8-sig") as f:
-            lines = f.readlines()
+    def _clean_lines(self, filepath: str) -> List[str]:
+        """Read UTF-8 or legacy Windows-encoded STM text.
+
+        UTF-8 is preferred, but older STM files are commonly saved using the
+        Windows-1252 ("ANSI") code page.  Record the detected encoding so the
+        editor can preserve it when the file is saved.
+        """
+        with open(filepath, "rb") as f:
+            raw = f.read()
+
+        if raw.startswith(b"\xef\xbb\xbf"):
+            text = raw.decode("utf-8-sig")
+            self.source_encoding = "utf-8-sig"
+        else:
+            try:
+                text = raw.decode("utf-8")
+                self.source_encoding = "utf-8"
+            except UnicodeDecodeError:
+                text = raw.decode("cp1252")
+                self.source_encoding = "cp1252"
+
+        lines = text.splitlines(keepends=True)
         lines = [line.rstrip() for line in lines]
         # drop blank trailing lines
         while lines and not lines[-1].strip():
@@ -438,7 +460,8 @@ class STMWriter:
             # "none" – no terminator (e.g. Yarra burst ranges)
             out.append(data_str + ",")
 
-    def write(self, sections: List[Section], filepath: str):
+    def write(self, sections: List[Section], filepath: str,
+              encoding: str = "utf-8"):
         out: List[str] = []
 
         for sec in sections:
@@ -498,7 +521,7 @@ class STMWriter:
                 for line in sec.raw_text.split("\n"):
                     out.append(line)
 
-        with open(filepath, "w", encoding="utf-8") as f:
+        with open(filepath, "w", encoding=encoding) as f:
             for line in out:
                 f.write(line + "\n")
 
@@ -642,16 +665,26 @@ class STMEditorDialog(QDialog):
     COLOR_HYDRO      = QColor(245, 235, 255)   # Light purple - hydrograph
     COLOR_READONLY   = QColor(240, 240, 240)   # Gray - read-only cells
 
+    _COLOR_NAMES = (
+        "COLOR_HEADER", "COLOR_PARAM", "COLOR_DATA", "COLOR_HYDRO", "COLOR_READONLY",
+    )
     MONO = QFont("Consolas", 10)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.sections: List[Section] = []
         self.filepath = ""
+        self.file_encoding = "utf-8"
         self._current_idx = -1
         self._updating = False          # guards against cellChanged feedback
         self._has_unsaved_changes = False  # track unsaved changes
         self._original_sections_data = []  # store original data for change detection
+
+        # Dark QGIS theme: swap the pastel colours for dark equivalents
+        self._dark = dark_theme.is_dark(self)
+        if self._dark:
+            for name in self._COLOR_NAMES:
+                setattr(self, name, dark_theme.adapt_color(getattr(type(self), name), True))
 
         self.setWindowTitle("RORB STM Editor")
         self.setMinimumSize(1000, 600)
@@ -659,6 +692,7 @@ class STMEditorDialog(QDialog):
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowMaximizeButtonHint)
 
         self._build_ui()
+        dark_theme.retheme(self, self._dark)
         self._wire_signals()
 
     # ====================================================================
@@ -879,7 +913,7 @@ class STMEditorDialog(QDialog):
         layout.addWidget(title)
 
         # --- Help text ---
-        help_text = QLabel(
+        help_text = QLabel(dark_theme.adapt_stylesheet(
             "<b>How to use:</b><br>"
             "1. Click <b style='color:#e65100;'>New STM</b> to create from scratch, "
             "or <b style='color:#1565C0;'>Open STM</b> to load a file<br>"
@@ -897,8 +931,9 @@ class STMEditorDialog(QDialog):
             "automatically. The <code>-99</code> terminators are managed "
             "by the editor and hidden from view.<br><br>"
             "<b>Note:</b> Storm Parameters (burst count, pluvio count) are "
-            "auto-synced when you add or delete sections."
-        )
+            "auto-synced when you add or delete sections.",
+            self._dark,
+        ))
         help_text.setWordWrap(True)
         help_text.setTextFormat(Qt.TextFormat.RichText)
         help_text.setStyleSheet("font-size: 9pt;")
@@ -1051,6 +1086,7 @@ class STMEditorDialog(QDialog):
         # Clear data
         self.sections = []
         self.filepath = ""
+        self.file_encoding = "utf-8"
         self._current_idx = -1
         self._has_unsaved_changes = False
         self._original_sections_data = []
@@ -1074,7 +1110,8 @@ class STMEditorDialog(QDialog):
         self.btn_save_as.setEnabled(False)
         self.btn_refresh.setEnabled(False)
         self._enable_section_buttons(False)
-        
+        dark_theme.retheme(self.editor_box, self._dark)
+        dark_theme.retheme(self.lbl_file, self._dark)        
         # Reset window title
         self.setWindowTitle("RORB STM Editor")
         
@@ -1161,10 +1198,12 @@ class STMEditorDialog(QDialog):
             parser = STMParser()
             self.sections = parser.parse(path)
             self.filepath = path
+            self.file_encoding = parser.source_encoding
             self.lbl_file.setText(os.path.basename(path))
             self.lbl_file.setStyleSheet(
                 "color: #333; font-weight: bold; font-size: 10pt; padding-left: 12px;"
             )
+            dark_theme.retheme(self.lbl_file, self._dark)
             self.btn_save.setEnabled(True)
             self.btn_save_as.setEnabled(True)
             self.btn_refresh.setEnabled(True)
@@ -1183,7 +1222,8 @@ class STMEditorDialog(QDialog):
                 f"Loaded {len(self.sections)} sections  |  "
                 f"Bursts: {parser.burst_count}  |  "
                 f"Pluviographs: {parser.pluvio_count}  |  "
-                f"Duration: {parser.duration} x {parser.time_inc} hr"
+                f"Duration: {parser.duration} x {parser.time_inc} hr  |  "
+                f"Encoding: {self._encoding_label()}"
             )
 
             # Update file info panel
@@ -1193,6 +1233,7 @@ class STMEditorDialog(QDialog):
                 f"<b>Burst count:</b> {parser.burst_count}<br>"
                 f"<b>Pluviographs:</b> {parser.pluvio_count}<br>"
                 f"<b>Duration:</b> {parser.duration} x {parser.time_inc} hr<br>"
+                f"<b>Encoding:</b> {self._encoding_label()}<br>"
                 f"<b>Path:</b> <span style='font-size:8pt;'>{path}</span>"
             )
 
@@ -1268,6 +1309,7 @@ class STMEditorDialog(QDialog):
             parser = STMParser()
             self.sections = parser.parse(path)
             self.filepath = path
+            self.file_encoding = parser.source_encoding
             self.lbl_file.setText(os.path.basename(path))
             self._clear_unsaved_changes()
             self.progress_bar.setValue(60)
@@ -1316,12 +1358,25 @@ class STMEditorDialog(QDialog):
 
     def _write(self, path: str):
         try:
-            STMWriter().write(self.sections, path)
+            STMWriter().write(
+                self.sections, path, encoding=self.file_encoding
+            )
             self._clear_unsaved_changes()
-            self._status(f"Saved successfully -> {path}")
+            self._status(
+                f"Saved successfully ({self._encoding_label()}) -> {path}"
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Save Error",
                                  f"Failed to save:\n\n{exc}")
+
+    def _encoding_label(self) -> str:
+        """Return a friendly label for the current file's text encoding."""
+        labels = {
+            "utf-8": "UTF-8",
+            "utf-8-sig": "UTF-8 (with BOM)",
+            "cp1252": "Windows-1252 (ANSI)",
+        }
+        return labels.get(self.file_encoding, self.file_encoding)
 
     # ====================================================================
     # TREE MANAGEMENT
@@ -1486,10 +1541,12 @@ class STMEditorDialog(QDialog):
         ]
 
         self.filepath = ""
+        self.file_encoding = "utf-8"
         self.lbl_file.setText("New STM (unsaved)")
         self.lbl_file.setStyleSheet(
             "color: #e65100; font-weight: bold; font-size: 10pt; padding-left: 12px;"
         )
+        dark_theme.retheme(self.lbl_file, self._dark)
         self.btn_save.setEnabled(True)
         self.btn_save_as.setEnabled(True)
         self._enable_section_buttons(True)
@@ -1715,7 +1772,8 @@ class STMEditorDialog(QDialog):
             f"<b>Burst count:</b> {burst_count}<br>"
             f"<b>Pluviographs:</b> {pluvio_count}<br>"
             f"<b>Hydro stations:</b> {hydro_count}<br>"
-            f"<b>Duration:</b> {duration} x {time_inc} hr"
+            f"<b>Duration:</b> {duration} x {time_inc} hr<br>"
+            f"<b>Encoding:</b> {self._encoding_label()}"
         )
 
     def _add_pluvio_section(self):
@@ -2291,7 +2349,7 @@ class STMEditorDialog(QDialog):
             self._ed_hydro_station(sec)
         elif st == "trailer":
             self._ed_text(sec)
-
+        dark_theme.retheme(self.editor_box, self._dark)
         delim_names = {"\t": "TAB", ",": "COMMA", None: "-"}
         d = delim_names.get(sec.delimiter, sec.delimiter or "-")
         status_text = sec.label
@@ -2389,10 +2447,12 @@ class STMEditorDialog(QDialog):
             first6 = text[:6].upper()
             if "FIT" in first6 or "DESIGN" in first6:
                 warn.setText("✅ Valid: contains FIT or DESIGN in first 6 columns.")
-                warn.setStyleSheet("font-weight: normal; color: #388E3C; font-size: 9pt;")
+                warn.setStyleSheet(dark_theme.adapt_stylesheet(
+                    "font-weight: normal; color: #388E3C; font-size: 9pt;", self._dark))
             else:
                 warn.setText("⚠️ Warning: RORB requires FIT or DESIGN in first 6 columns.")
-                warn.setStyleSheet("font-weight: normal; color: #e65100; font-size: 9pt;")
+                warn.setStyleSheet(dark_theme.adapt_stylesheet(
+                    "font-weight: normal; color: #e65100; font-size: 9pt;", self._dark))
 
         edit.textChanged.connect(_validate)
         _validate(sec.raw_text)  # initial validation
